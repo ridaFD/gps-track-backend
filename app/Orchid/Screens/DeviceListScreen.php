@@ -55,7 +55,7 @@ class DeviceListScreen extends Screen
         return [
             Link::make('Create New Device')
                 ->icon('plus')
-                ->route('platform.devices.edit'),
+                ->route('platform.devices.create'),
         ];
     }
 

@@ -54,7 +54,7 @@ class GeofenceListScreen extends Screen
         return [
             Link::make('Create New Geofence')
                 ->icon('plus')
-                ->route('platform.geofences.edit'),
+                ->route('platform.geofences.create'),
         ];
     }
 
