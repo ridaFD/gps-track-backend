@@ -1,0 +1,218 @@
+# Docker Compose for GPS Track Backend
+version: '3.8'
+
+services:
+  # PostgreSQL with PostGIS
+  postgres:
+    image: postgis/postgis:15-3.3
+    container_name: gps_postgres
+    environment:
+      POSTGRES_DB: gps_track
+      POSTGRES_USER: gps_user
+      POSTGRES_PASSWORD: gps_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - gps_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gps_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # TimescaleDB for telemetry
+  timescale:
+    image: timescale/timescaledb:latest-pg15
+    container_name: gps_timescale
+    environment:
+      POSTGRES_DB: gps_telemetry
+      POSTGRES_USER: gps_user
+      POSTGRES_PASSWORD: gps_password
+    ports:
+      - "5433:5432"
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+      - ./sql/timescale-init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - gps_network
+
+  # Redis
+  redis:
+    image: redis:7-alpine
+    container_name: gps_redis
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - gps_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Kafka Setup (Message Bus)
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest
+    container_name: gps_zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - gps_network
+
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    container_name: gps_kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    networks:
+      - gps_network
+
+  # Traccar GPS Server (Optional)
+  traccar:
+    image: traccar/traccar:latest
+    container_name: gps_traccar
+    ports:
+      - "8082:8082"  # HTTP interface
+      - "5000-5150:5000-5150"  # GPS protocols
+      - "5000-5150:5000-5150/udp"
+    volumes:
+      - traccar_data:/opt/traccar/data
+      - ./traccar/traccar.xml:/opt/traccar/conf/traccar.xml
+    networks:
+      - gps_network
+    restart: unless-stopped
+
+  # Laravel Application
+  laravel:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gps_laravel
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      APP_ENV: local
+      APP_DEBUG: "true"
+      DB_CONNECTION: pgsql
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_DATABASE: gps_track
+      DB_USERNAME: gps_user
+      DB_PASSWORD: gps_password
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      KAFKA_BROKERS: kafka:29092
+    volumes:
+      - .:/var/www/html
+      - laravel_storage:/var/www/html/storage
+    networks:
+      - gps_network
+    command: php artisan serve --host=0.0.0.0 --port=8000
+
+  # Laravel Horizon (Queue Worker)
+  horizon:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gps_horizon
+    depends_on:
+      - laravel
+      - redis
+    environment:
+      APP_ENV: local
+      DB_CONNECTION: pgsql
+      DB_HOST: postgres
+      REDIS_HOST: redis
+    volumes:
+      - .:/var/www/html
+    networks:
+      - gps_network
+    command: php artisan horizon
+    restart: unless-stopped
+
+  # Laravel WebSockets
+  websockets:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gps_websockets
+    depends_on:
+      - redis
+    ports:
+      - "6001:6001"
+    environment:
+      APP_ENV: local
+      REDIS_HOST: redis
+    volumes:
+      - .:/var/www/html
+    networks:
+      - gps_network
+    command: php artisan websockets:serve
+    restart: unless-stopped
+
+  # Meilisearch (Optional - Search Engine)
+  meilisearch:
+    image: getmeili/meilisearch:latest
+    container_name: gps_meilisearch
+    ports:
+      - "7700:7700"
+    environment:
+      MEILI_MASTER_KEY: masterKey
+      MEILI_ENV: development
+    volumes:
+      - meilisearch_data:/meili_data
+    networks:
+      - gps_network
+
+  # Nginx (Production)
+  nginx:
+    image: nginx:alpine
+    container_name: gps_nginx
+    depends_on:
+      - laravel
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - .:/var/www/html
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./docker/nginx/conf.d:/etc/nginx/conf.d
+      - ./docker/nginx/ssl:/etc/nginx/ssl
+    networks:
+      - gps_network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  timescale_data:
+  redis_data:
+  traccar_data:
+  laravel_storage:
+  meilisearch_data:
+
+networks:
+  gps_network:
+    driver: bridge
+
