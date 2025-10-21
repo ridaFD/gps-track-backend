@@ -6,6 +6,7 @@ use App\Models\Device;
 use App\Models\Position;
 use App\Models\Geofence;
 use App\Models\Alert;
+use App\Jobs\GenerateReportJob;
 
 /*
 |--------------------------------------------------------------------------
@@ -388,27 +389,90 @@ Route::prefix('v1')->group(function () {
             ]);
         });
 
-        // Reports
+        // Reports - Generate
         Route::post('/reports/generate', function (Request $request) {
+            $validated = $request->validate([
+                'type' => 'required|in:devices,trips,alerts',
+                'from' => 'nullable|date',
+                'to' => 'nullable|date',
+                'device_id' => 'nullable|integer',
+            ]);
+
+            // Dispatch report generation job
+            GenerateReportJob::dispatch(
+                $validated['type'],
+                $request->only(['from', 'to', 'device_id'])
+            );
+
             return response()->json([
                 'message' => 'Report generation started',
-                'report_id' => uniqid('report_'),
+                'type' => $validated['type'],
                 'status' => 'processing',
             ], 202);
         });
 
-        Route::get('/reports/{id}', function ($id) {
+        // Reports - List all available reports
+        Route::get('/reports', function () {
+            $reportsPath = storage_path('app/reports');
+            
+            if (!is_dir($reportsPath)) {
+                return response()->json(['reports' => []]);
+            }
+
+            $files = array_diff(scandir($reportsPath, SCANDIR_SORT_DESCENDING), ['.', '..']);
+            
+            $reports = array_map(function($file) use ($reportsPath) {
+                $filePath = $reportsPath . '/' . $file;
+                return [
+                    'filename' => $file,
+                    'size' => filesize($filePath),
+                    'created_at' => filemtime($filePath),
+                    'download_url' => "/api/v1/reports/download/" . urlencode($file),
+                ];
+            }, $files);
+
+            return response()->json([
+                'reports' => array_values($reports),
+                'count' => count($reports),
+            ]);
+        });
+
+        // Reports - Download specific report
+        Route::get('/reports/download/{filename}', function ($filename) {
+            $path = storage_path('app/reports/' . $filename);
+            
+            if (!file_exists($path)) {
+                return response()->json(['error' => 'Report not found'], 404);
+            }
+            
+            return response()->download($path);
+        });
+
+        // Reports - Delete specific report
+        Route::delete('/reports/delete/{filename}', function ($filename) {
+            $path = storage_path('app/reports/' . $filename);
+            
+            if (!file_exists($path)) {
+                return response()->json(['error' => 'Report not found'], 404);
+            }
+            
+            // Delete the file
+            if (unlink($path)) {
+                return response()->json([
+                    'message' => 'Report deleted successfully',
+                    'filename' => $filename,
+                ], 200);
+            }
+            
+            return response()->json(['error' => 'Failed to delete report'], 500);
+        });
+
+        // Reports - Get report status (for polling)
+        Route::get('/reports/status/{id}', function ($id) {
             return response()->json([
                 'id' => $id,
-                'type' => 'trip_report',
                 'status' => 'completed',
                 'generated_at' => now()->toISOString(),
-                'data' => [
-                    'total_trips' => Device::count() * 10,
-                    'total_distance' => Position::sum('speed') / 10,
-                    'total_duration' => '25h 30m',
-                    'fuel_consumed' => 125.5,
-                ],
             ]);
         });
     });
