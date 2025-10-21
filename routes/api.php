@@ -31,38 +31,79 @@ Route::prefix('v1')->group(function () {
         ]);
     });
 
-    // Mock authentication endpoints (for testing)
+    // Authentication endpoints (Sanctum)
     Route::post('/login', function (Request $request) {
+        $request->validate([
+            'email' => 'required|email',
+            'password' => 'required',
+        ]);
+
+        $user = \App\Models\User::where('email', $request->email)->first();
+
+        if (!$user || !\Hash::check($request->password, $user->password)) {
+            return response()->json([
+                'message' => 'Invalid credentials'
+            ], 401);
+        }
+
+        // Create token
+        $token = $user->createToken('api-token')->plainTextToken;
+
         return response()->json([
-            'token' => 'mock-token-' . uniqid(),
+            'token' => $token,
             'user' => [
-                'id' => 1,
-                'name' => 'John Doe',
-                'email' => 'john@example.com',
+                'id' => $user->id,
+                'name' => $user->name,
+                'email' => $user->email,
             ],
         ]);
     });
 
     Route::post('/register', function (Request $request) {
+        $request->validate([
+            'name' => 'required|string|max:255',
+            'email' => 'required|string|email|max:255|unique:users',
+            'password' => 'required|string|min:8|confirmed',
+        ]);
+
+        $user = \App\Models\User::create([
+            'name' => $request->name,
+            'email' => $request->email,
+            'password' => \Hash::make($request->password),
+        ]);
+
+        // Create token
+        $token = $user->createToken('api-token')->plainTextToken;
+
         return response()->json([
             'message' => 'User registered successfully',
+            'token' => $token,
             'user' => [
-                'id' => 1,
-                'name' => $request->input('name', 'New User'),
-                'email' => $request->input('email', 'user@example.com'),
+                'id' => $user->id,
+                'name' => $user->name,
+                'email' => $user->email,
             ],
-        ]);
+        ], 201);
     });
 
-    // Protected routes
-    Route::middleware('api')->group(function () {
+    // Protected routes (require authentication)
+    Route::middleware('auth:sanctum')->group(function () {
+        
+        // Logout endpoint
+        Route::post('/logout', function (Request $request) {
+            $request->user()->currentAccessToken()->delete();
+            
+            return response()->json([
+                'message' => 'Logged out successfully'
+            ]);
+        });
         
         // User info
         Route::get('/user', function (Request $request) {
             return response()->json([
-                'id' => 1,
-                'name' => 'John Doe',
-                'email' => 'john@example.com',
+                'id' => $request->user()->id,
+                'name' => $request->user()->name,
+                'email' => $request->user()->email,
                 'company' => 'GPS Tracking Inc.',
                 'role' => 'admin',
             ]);
