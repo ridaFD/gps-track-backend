@@ -14,6 +14,7 @@ class Alert extends Model
     use HasFactory, AsSource, Filterable, LogsActivity;
 
     protected $fillable = [
+        'organization_id',
         'device_id',
         'geofence_id',
         'type',
@@ -41,6 +42,24 @@ class Alert extends Model
     public function geofence()
     {
         return $this->belongsTo(Geofence::class);
+    }
+
+    public function organization()
+    {
+        return $this->belongsTo(Organization::class);
+    }
+
+    /**
+     * Boot method for global scopes
+     */
+    protected static function booted()
+    {
+        // Global scope to automatically filter by current organization
+        static::addGlobalScope('organization', function ($query) {
+            if (auth()->check() && auth()->user()->currentOrganization()) {
+                $query->where('organization_id', auth()->user()->currentOrganization()->id);
+            }
+        });
     }
 
     /**

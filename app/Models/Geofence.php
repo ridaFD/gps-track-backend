@@ -15,6 +15,7 @@ class Geofence extends Model
     use HasFactory, SoftDeletes, AsSource, Filterable, LogsActivity;
 
     protected $fillable = [
+        'organization_id',
         'name',
         'description',
         'type',
@@ -50,6 +51,24 @@ class Geofence extends Model
     public function user()
     {
         return $this->belongsTo(User::class);
+    }
+
+    public function organization()
+    {
+        return $this->belongsTo(Organization::class);
+    }
+
+    /**
+     * Boot method for global scopes
+     */
+    protected static function booted()
+    {
+        // Global scope to automatically filter by current organization
+        static::addGlobalScope('organization', function ($query) {
+            if (auth()->check() && auth()->user()->currentOrganization()) {
+                $query->where('organization_id', auth()->user()->currentOrganization()->id);
+            }
+        });
     }
 
     /**

@@ -6,6 +6,7 @@ use App\Models\Device;
 use App\Models\Position;
 use App\Models\Geofence;
 use App\Models\Alert;
+use App\Models\Organization;
 use App\Jobs\GenerateReportJob;
 use Spatie\Activitylog\Models\Activity;
 
@@ -623,6 +624,313 @@ Route::prefix('v1')->group(function () {
                     ];
                 }),
                 'count' => $activities->count(),
+            ]);
+        });
+
+        // ==========================================
+        // ORGANIZATIONS (Multi-Tenancy)
+        // ==========================================
+
+        // List user's organizations
+        Route::get('/organizations', function (Request $request) {
+            $user = $request->user();
+            $organizations = $user->organizations()
+                ->with(['users' => function($query) {
+                    $query->select('users.id', 'users.name', 'users.email')
+                          ->withPivot('role');
+                }])
+                ->get()
+                ->map(function($org) use ($user) {
+                    return [
+                        'id' => $org->id,
+                        'name' => $org->name,
+                        'slug' => $org->slug,
+                        'email' => $org->email,
+                        'phone' => $org->phone,
+                        'plan' => $org->plan,
+                        'max_devices' => $org->max_devices,
+                        'max_users' => $org->max_users,
+                        'device_count' => $org->devices()->count(),
+                        'user_count' => $org->users()->count(),
+                        'is_active' => $org->is_active,
+                        'is_on_trial' => $org->isOnTrial(),
+                        'trial_ends_at' => $org->trial_ends_at?->toISOString(),
+                        'is_owner' => $org->isOwner($user),
+                        'is_admin' => $org->isAdmin($user),
+                        'role' => $org->users()->where('users.id', $user->id)->first()?->pivot->role,
+                        'created_at' => $org->created_at->toISOString(),
+                    ];
+                });
+
+            return response()->json([
+                'data' => $organizations,
+                'current_organization_id' => session('current_organization_id'),
+            ]);
+        });
+
+        // Create new organization
+        Route::post('/organizations', function (Request $request) {
+            $request->validate([
+                'name' => 'required|string|max:255',
+                'email' => 'nullable|email',
+                'phone' => 'nullable|string|max:50',
+                'address' => 'nullable|string',
+                'plan' => 'nullable|in:starter,professional,enterprise',
+            ]);
+
+            $user = $request->user();
+
+            $organization = Organization::create([
+                'name' => $request->name,
+                'email' => $request->email,
+                'phone' => $request->phone,
+                'address' => $request->address,
+                'plan' => $request->plan ?? 'starter',
+                'max_devices' => match($request->plan ?? 'starter') {
+                    'starter' => 10,
+                    'professional' => 50,
+                    'enterprise' => 999999,
+                },
+                'max_users' => match($request->plan ?? 'starter') {
+                    'starter' => 5,
+                    'professional' => 20,
+                    'enterprise' => 999999,
+                },
+                'trial_ends_at' => now()->addDays(14), // 14-day trial
+            ]);
+
+            // Add creator as owner
+            $organization->users()->attach($user->id, ['role' => 'owner']);
+
+            // Set as current organization
+            session(['current_organization_id' => $organization->id]);
+
+            return response()->json([
+                'data' => $organization,
+                'message' => 'Organization created successfully',
+            ], 201);
+        });
+
+        // Get organization details
+        Route::get('/organizations/{id}', function ($id) {
+            $user = auth()->user();
+            $organization = $user->organizations()->with(['users', 'devices', 'geofences'])->findOrFail($id);
+
+            return response()->json([
+                'data' => [
+                    'id' => $organization->id,
+                    'name' => $organization->name,
+                    'slug' => $organization->slug,
+                    'email' => $organization->email,
+                    'phone' => $organization->phone,
+                    'address' => $organization->address,
+                    'plan' => $organization->plan,
+                    'max_devices' => $organization->max_devices,
+                    'max_users' => $organization->max_users,
+                    'settings' => $organization->settings,
+                    'is_active' => $organization->is_active,
+                    'trial_ends_at' => $organization->trial_ends_at?->toISOString(),
+                    'subscription_ends_at' => $organization->subscription_ends_at?->toISOString(),
+                    'device_count' => $organization->devices->count(),
+                    'user_count' => $organization->users->count(),
+                    'geofence_count' => $organization->geofences->count(),
+                    'is_owner' => $organization->isOwner($user),
+                    'is_admin' => $organization->isAdmin($user),
+                    'created_at' => $organization->created_at->toISOString(),
+                ],
+            ]);
+        });
+
+        // Update organization
+        Route::put('/organizations/{id}', function (Request $request, $id) {
+            $user = auth()->user();
+            $organization = $user->organizations()->findOrFail($id);
+
+            // Only owners can update organization
+            if (!$organization->isOwner($user)) {
+                return response()->json(['error' => 'Only organization owners can update settings'], 403);
+            }
+
+            $request->validate([
+                'name' => 'sometimes|string|max:255',
+                'email' => 'sometimes|nullable|email',
+                'phone' => 'sometimes|nullable|string|max:50',
+                'address' => 'sometimes|nullable|string',
+                'settings' => 'sometimes|array',
+            ]);
+
+            $organization->update($request->only(['name', 'email', 'phone', 'address', 'settings']));
+
+            return response()->json([
+                'data' => $organization,
+                'message' => 'Organization updated successfully',
+            ]);
+        });
+
+        // Delete organization
+        Route::delete('/organizations/{id}', function ($id) {
+            $user = auth()->user();
+            $organization = $user->organizations()->findOrFail($id);
+
+            // Only owners can delete organization
+            if (!$organization->isOwner($user)) {
+                return response()->json(['error' => 'Only organization owners can delete the organization'], 403);
+            }
+
+            $organization->delete();
+
+            // Switch to another organization if current was deleted
+            if (session('current_organization_id') == $id) {
+                $newOrg = $user->organizations()->first();
+                session(['current_organization_id' => $newOrg?->id]);
+            }
+
+            return response()->json([
+                'message' => 'Organization deleted successfully',
+            ]);
+        });
+
+        // Switch current organization
+        Route::post('/organizations/{id}/switch', function ($id) {
+            $user = auth()->user();
+            $organization = $user->organizations()->findOrFail($id);
+
+            session(['current_organization_id' => $organization->id]);
+
+            return response()->json([
+                'message' => 'Switched to organization: ' . $organization->name,
+                'current_organization' => [
+                    'id' => $organization->id,
+                    'name' => $organization->name,
+                    'plan' => $organization->plan,
+                ],
+            ]);
+        });
+
+        // List organization users
+        Route::get('/organizations/{id}/users', function ($id) {
+            $user = auth()->user();
+            $organization = $user->organizations()->findOrFail($id);
+
+            $users = $organization->users()
+                ->withPivot('role', 'created_at')
+                ->get()
+                ->map(function($u) {
+                    return [
+                        'id' => $u->id,
+                        'name' => $u->name,
+                        'email' => $u->email,
+                        'role' => $u->pivot->role,
+                        'joined_at' => $u->pivot->created_at->toISOString(),
+                    ];
+                });
+
+            return response()->json([
+                'data' => $users,
+                'count' => $users->count(),
+            ]);
+        });
+
+        // Invite user to organization
+        Route::post('/organizations/{id}/users', function (Request $request, $id) {
+            $user = auth()->user();
+            $organization = $user->organizations()->findOrFail($id);
+
+            // Only admins/owners can invite users
+            if (!$organization->isAdmin($user)) {
+                return response()->json(['error' => 'Only administrators can invite users'], 403);
+            }
+
+            // Check user limit
+            if (!$organization->canAddUser()) {
+                return response()->json(['error' => 'User limit reached for current plan'], 403);
+            }
+
+            $request->validate([
+                'email' => 'required|email',
+                'role' => 'required|in:owner,admin,member',
+            ]);
+
+            // Find or create user
+            $invitedUser = \App\Models\User::where('email', $request->email)->first();
+            
+            if (!$invitedUser) {
+                return response()->json([
+                    'error' => 'User not found. User must create an account first.',
+                ], 404);
+            }
+
+            // Check if already member
+            if ($organization->users()->where('users.id', $invitedUser->id)->exists()) {
+                return response()->json(['error' => 'User is already a member'], 400);
+            }
+
+            // Add user to organization
+            $organization->users()->attach($invitedUser->id, ['role' => $request->role]);
+
+            return response()->json([
+                'message' => 'User added to organization successfully',
+                'user' => [
+                    'id' => $invitedUser->id,
+                    'name' => $invitedUser->name,
+                    'email' => $invitedUser->email,
+                    'role' => $request->role,
+                ],
+            ], 201);
+        });
+
+        // Remove user from organization
+        Route::delete('/organizations/{id}/users/{userId}', function ($id, $userId) {
+            $user = auth()->user();
+            $organization = $user->organizations()->findOrFail($id);
+
+            // Only admins/owners can remove users
+            if (!$organization->isAdmin($user)) {
+                return response()->json(['error' => 'Only administrators can remove users'], 403);
+            }
+
+            // Can't remove yourself
+            if ($userId == $user->id) {
+                return response()->json(['error' => 'Cannot remove yourself from organization'], 400);
+            }
+
+            $organization->users()->detach($userId);
+
+            return response()->json([
+                'message' => 'User removed from organization successfully',
+            ]);
+        });
+
+        // Get organization stats
+        Route::get('/organizations/{id}/stats', function ($id) {
+            $user = auth()->user();
+            $organization = $user->organizations()->findOrFail($id);
+
+            return response()->json([
+                'data' => [
+                    'devices' => [
+                        'total' => $organization->devices()->count(),
+                        'active' => $organization->devices()->where('status', 'active')->count(),
+                        'inactive' => $organization->devices()->where('status', 'inactive')->count(),
+                        'limit' => $organization->max_devices,
+                    ],
+                    'users' => [
+                        'total' => $organization->users()->count(),
+                        'owners' => $organization->users()->wherePivot('role', 'owner')->count(),
+                        'admins' => $organization->users()->wherePivot('role', 'admin')->count(),
+                        'members' => $organization->users()->wherePivot('role', 'member')->count(),
+                        'limit' => $organization->max_users,
+                    ],
+                    'geofences' => [
+                        'total' => $organization->geofences()->count(),
+                        'active' => $organization->geofences()->where('active', true)->count(),
+                    ],
+                    'alerts' => [
+                        'total' => $organization->alerts()->count(),
+                        'unread' => $organization->alerts()->where('read', false)->count(),
+                        'today' => $organization->alerts()->whereDate('created_at', today())->count(),
+                    ],
+                ],
             ]);
         });
     });
