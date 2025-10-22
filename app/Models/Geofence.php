@@ -7,10 +7,12 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Orchid\Filters\Filterable;
 use Orchid\Screen\AsSource;
+use Spatie\Activitylog\Traits\LogsActivity;
+use Spatie\Activitylog\LogOptions;
 
 class Geofence extends Model
 {
-    use HasFactory, SoftDeletes, AsSource, Filterable;
+    use HasFactory, SoftDeletes, AsSource, Filterable, LogsActivity;
 
     protected $fillable = [
         'name',
@@ -48,5 +50,17 @@ class Geofence extends Model
     public function user()
     {
         return $this->belongsTo(User::class);
+    }
+
+    /**
+     * Activity Log configuration
+     */
+    public function getActivitylogOptions(): LogOptions
+    {
+        return LogOptions::defaults()
+            ->logOnly(['name', 'description', 'type', 'center_lat', 'center_lng', 'radius', 'active', 'alert_on_enter', 'alert_on_exit'])
+            ->logOnlyDirty()
+            ->dontSubmitEmptyLogs()
+            ->setDescriptionForEvent(fn(string $eventName) => "Geofence {$eventName}");
     }
 }

@@ -7,6 +7,7 @@ use App\Models\Position;
 use App\Models\Geofence;
 use App\Models\Alert;
 use App\Jobs\GenerateReportJob;
+use Spatie\Activitylog\Models\Activity;
 
 /*
 |--------------------------------------------------------------------------
@@ -131,6 +132,45 @@ Route::prefix('v1')->group(function () {
                 'alerts_today' => $alertsToday,
                 'distance_today' => round($distanceToday, 1),
                 'active_trips' => $activeTrips,
+            ]);
+        });
+
+        // Search Devices
+        Route::get('/devices/search', function (Request $request) {
+            $query = $request->input('q', '');
+            
+            if (empty($query)) {
+                return response()->json([
+                    'data' => [],
+                    'message' => 'Please provide a search query'
+                ]);
+            }
+            
+            $devices = Device::search($query)
+                ->query(fn ($builder) => $builder->with('lastPosition'))
+                ->get()
+                ->map(function($device) {
+                    $lastPos = $device->lastPosition;
+                    return [
+                        'id' => $device->id,
+                        'name' => $device->name,
+                        'type' => $device->type,
+                        'status' => $device->status,
+                        'plate_number' => $device->plate_number,
+                        'imei' => $device->imei,
+                        'last_position' => $lastPos ? [
+                            'lat' => $lastPos->latitude,
+                            'lng' => $lastPos->longitude,
+                            'speed' => $lastPos->speed,
+                            'timestamp' => $lastPos->device_time,
+                        ] : null,
+                    ];
+                });
+            
+            return response()->json([
+                'data' => $devices,
+                'count' => $devices->count(),
+                'query' => $query,
             ]);
         });
 
@@ -514,6 +554,75 @@ Route::prefix('v1')->group(function () {
                 'id' => $id,
                 'status' => 'completed',
                 'generated_at' => now()->toISOString(),
+            ]);
+        });
+
+        // Activity Log - Get all activities
+        Route::get('/activity-log', function (Request $request) {
+            $query = Activity::with(['causer', 'subject'])
+                ->orderBy('created_at', 'desc');
+            
+            // Filter by model type
+            if ($request->has('model_type')) {
+                $query->where('subject_type', $request->model_type);
+            }
+            
+            // Filter by model id
+            if ($request->has('model_id')) {
+                $query->where('subject_id', $request->model_id);
+            }
+            
+            // Filter by causer (user)
+            if ($request->has('user_id')) {
+                $query->where('causer_id', $request->user_id);
+            }
+            
+            // Limit
+            $limit = $request->input('limit', 50);
+            $activities = $query->limit($limit)->get();
+            
+            return response()->json([
+                'data' => $activities->map(function($activity) {
+                    return [
+                        'id' => $activity->id,
+                        'description' => $activity->description,
+                        'subject_type' => class_basename($activity->subject_type),
+                        'subject_id' => $activity->subject_id,
+                        'causer_name' => $activity->causer->name ?? 'System',
+                        'causer_email' => $activity->causer->email ?? null,
+                        'properties' => $activity->properties,
+                        'created_at' => $activity->created_at->toISOString(),
+                    ];
+                }),
+                'count' => $activities->count(),
+            ]);
+        });
+
+        // Activity Log - Get activities for specific model
+        Route::get('/activity-log/{modelType}/{modelId}', function ($modelType, $modelId) {
+            $modelClass = 'App\\Models\\' . ucfirst($modelType);
+            
+            if (!class_exists($modelClass)) {
+                return response()->json(['error' => 'Invalid model type'], 400);
+            }
+            
+            $activities = Activity::where('subject_type', $modelClass)
+                ->where('subject_id', $modelId)
+                ->with('causer')
+                ->orderBy('created_at', 'desc')
+                ->get();
+            
+            return response()->json([
+                'data' => $activities->map(function($activity) {
+                    return [
+                        'id' => $activity->id,
+                        'description' => $activity->description,
+                        'causer_name' => $activity->causer->name ?? 'System',
+                        'properties' => $activity->properties,
+                        'created_at' => $activity->created_at->toISOString(),
+                    ];
+                }),
+                'count' => $activities->count(),
             ]);
         });
     });
