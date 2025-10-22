@@ -62,4 +62,38 @@ class User extends Authenticatable
             ->logOnlyDirty()
             ->dontSubmitEmptyLogs();
     }
+
+    /**
+     * Multi-tenancy relationships
+     */
+    public function organizations()
+    {
+        return $this->belongsToMany(Organization::class)
+            ->withPivot('role')
+            ->withTimestamps();
+    }
+
+    public function currentOrganization()
+    {
+        // Get from session or default to first organization
+        $orgId = session('current_organization_id');
+        
+        if ($orgId) {
+            return $this->organizations()->find($orgId);
+        }
+        
+        return $this->organizations()->first();
+    }
+
+    public function switchOrganization($organizationId)
+    {
+        $organization = $this->organizations()->find($organizationId);
+        
+        if ($organization) {
+            session(['current_organization_id' => $organizationId]);
+            return $organization;
+        }
+        
+        return null;
+    }
 }
