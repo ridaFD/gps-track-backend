@@ -14,5 +14,15 @@ use Illuminate\Support\Facades\Route;
 */
 
 Route::get('/', function () {
-    return view('welcome');
+    return response()->json([
+        'name' => 'GPS Track API',
+        'version' => '1.0.0',
+        'status' => 'running',
+        'endpoints' => [
+            'api' => url('/api/v1'),
+            'admin' => url('/admin'),
+            'docs' => url('/docs'),
+        ],
+        'message' => 'Welcome to GPS Track API! Visit /admin for the admin panel.',
+    ]);
 });
